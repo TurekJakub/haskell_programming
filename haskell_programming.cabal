@@ -74,4 +74,4 @@ executable turek0
     hs-source-dirs:   src/00
 
     -- Base language which the package is written in.
-    default-language: GHC2024
+    -- default-language: GHC2024
