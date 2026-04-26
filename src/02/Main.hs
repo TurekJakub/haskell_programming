@@ -1,18 +1,28 @@
 #!/usr/bin/env cabal
 {- cabal:
-build-depends: base, megaparsec
+build-depends: base, parser-combinators, megaparsec, pretty
 -}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE LambdaCase #-}
 
-import Control.Monad (void)
+import Control.Monad (guard, void, when)
+import Control.Monad.Combinators.Expr
 import Data.Bool (bool)
+import Data.Char (chr)
+import Data.Fixed (div')
 import Data.List (intercalate)
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Void (Void)
+import System.Console.GetOpt (ArgDescr(NoArg))
+import System.Environment (getArgs)
+import System.Exit (die)
 import Text.Megaparsec
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
-import Data.Fixed (div')
+import qualified Text.Megaparsec.Internal as LL
+import qualified Text.PrettyPrint as P
+import Text.PrettyPrint (quotes)
+import Text.Read (Lexeme(Char))
 
 {- | A data type for tokens. `TBlanks` stores the size of the blank space,
  - because we need it to measure the indentation width. -}
@@ -70,17 +80,19 @@ tok =
     [ try ((T <$> id <*> TInt . read) <$> some digitChar)
     , try $ do
         ident <- some (alphaNumChar <|> char '_')
-        return $ T ident (TIdent ident),
-     try $ do
+        return $ T ident (TIdent ident)
+    , try $ do
         str <- char '"' *> manyTill L.charLiteral (char '"')
         return $ T str (TString str)
     , try ((T <$> id <*> TBlanks . length) <$> some (char ' '))
-    , try ((\op -> T [op] (TOperator op))  <$> oneOf "+-></*%=")
+    , try ((\op -> T [op] (TOperator op)) <$> oneOf "+-></*%=")
     , T "(" TLeftParenthesis <$ char '('
     , T ")" TRightParenthesis <$ char ')'
     , T "\n" TNewLine <$ char '\n'
     , T ":" TTwoDots <$ char ':'
-    , try((\op -> T [op] (TOperator op))  <$> (char '\'' *> anySingle <* char '\''))
+    , try
+        ((\op -> T [op] (TOperator op))
+           <$> (char '\'' *> anySingle <* char '\''))
     ]
 
 toks :: Tokenizer [T Tok]
@@ -102,18 +114,28 @@ tokenize = runParser (TokStream <$> toks <* eof)
 -- | The parser takes the tagged stream of tokens as an input
 type Parser = Parsec Void TokStream
 
-data Ast = 
-     CharLiteral Int 
-    | IntLiteral Int
-    | Variable String
-    | FunctionDefinition String [String] [Ast]
-    | FunctionCall String [Ast]
-    | Assignment String Ast
-    | BinaryExpression Char Ast Ast
-    | Condition Ast [Ast] (Maybe [Ast])
-    | Loop Ast [Ast]
-    | Pass 
-    deriving (Show)
+data NOperator
+  = Add
+  | Subtract
+  | Multiply
+  | Divide
+  | Modulo
+  | GreaterThan
+  | LesserThan
+  deriving (Show, Eq)
+
+data Ast
+  = CharLiteral Int
+  | IntLiteral Int
+  | Variable String
+  | FunctionDefinition String [String] [Ast]
+  | FunctionCall String [Ast]
+  | Assignment String Ast
+  | BinaryExpression NOperator Ast Ast
+  | Condition Ast [Ast] (Maybe [Ast])
+  | Loop Ast [Ast]
+  | Pass
+  deriving (Show)
 
 -- | parse any amount of blanks
 blanks = void $ many (satisfy isBlank)
@@ -141,58 +163,163 @@ pairLine = (,) <$> pLexeme pInt <*> pLexeme pInt <* pLexeme (single TNewLine)
 -- | parse lots of integer pairs, each on a single line
 parsePairs = runParser (blanks *> many pairLine <* eof)
 
-parseCharLiteral = do 
+parseCharLiteral = do
   TChar c <- blanks *> satisfy isChar <?> "char"
-  return $ CharLiteral c 
-  where 
-      isChar (TChar _) = True
-      isChar _ = False 
+  return $ CharLiteral c
+  where
+    isChar (TChar _) = True
+    isChar _ = False
 
-parseIntLiteral = do 
-  TChar c <- blanks *> satisfy isInt <?> "int"
-  return $ CharLiteral c 
-  where 
-      isInt (TChar _) = True
-      isInt _ = False 
+parseIntLiteral = do
+  TInt c <- blanks *> satisfy isInt <?> "int"
+  return (IntLiteral c)
+  where
+    isInt (TInt _) = True
+    isInt _ = False
 
-parseVariable = do  
+parseVariable = do
   TIdent name <- blanks *> satisfy isIdent
   return $ Variable name
 
-parseLiteral = choice [try parseIntLiteral, try parseCharLiteral, try parseVariable]
+parseLiteral =
+  choice [try parseIntLiteral, try parseCharLiteral, try parseVariable]
 
 isIdent (TIdent _) = True
 isIdent _ = False
 
-parseFuncArgs = single TLeftParenthesis *> sepBy (satisfy isIdent  >>= \(TIdent arg) -> return arg) (single (TIdent ",")) <* single TRightParenthesis 
+parseFuncArgs =
+  single TLeftParenthesis
+    *> sepBy
+         (satisfy isIdent >>= \(TIdent arg) -> return arg)
+         (single (TIdent ","))
+    <* single TRightParenthesis
 
-parseFuncHeader = do 
-  TIdent name <- blanks *> pLexeme (single (TIdent "def")) *> pLexeme (satisfy isIdent )
-  args <- parseFuncArgs <* pLexeme (single TTwoDots) <* eof
-  return (FunctionDefinition name args [])
-      
-parseFn = runParser parseFuncHeader
+parseIndentedBlock :: Pos -> Parser [Ast]
+parseIndentedBlock ref = do
+  _ <- satisfy (== TNewLine)
+  many (parseBlockLine ref)
+
+sc :: Parser ()
+sc = L.space (void $ satisfy isSpaceToken) empty empty
+  where
+    isSpaceToken (TBlanks _) = True
+    isSpaceToken TNewLine = False
+    isSpaceToken _ = False
+
+parseBlockLine :: Pos -> Parser Ast
+parseBlockLine ref = do
+  L.indentGuard sc GT ref
+  pLexeme (choice [try parseAssignment, parseExpression])
+    <* satisfy (== TNewLine)
+
+parseOneLiner :: Parser [Ast]
+parseOneLiner = do
+  statement <- blindwormParser
+  return [statement]
+
+parseFuncDefinition = do
+  ref <- L.indentLevel
+  TIdent name <-
+    blanks *> pLexeme (single (TIdent "def")) *> pLexeme (satisfy isIdent)
+  args <- parseFuncArgs <* pLexeme (single TTwoDots)
+  body <- try parseOneLiner <|> parseIndentedBlock ref
+  return (FunctionDefinition name args body)
 
 parseFuncCall = do
-    TIdent name <- blanks *> satisfy isIdent
-    args <- single TLeftParenthesis *> sepBy parseLiteral (single (TIdent ",")) <* single TRightParenthesis
-    return (FunctionCall name args)
+  TIdent name <- blanks *> satisfy isIdent
+  args <-
+    single TLeftParenthesis
+      *> sepBy parseExpression (single (TIdent ","))
+      <* single TRightParenthesis
+  return (FunctionCall name args)
 
-parseS = runParser (choice [
-                try parseFuncCall,
-  try parseLiteral,
-                try parseIntLiteral])
+parseOperator = do
+  blanks *> satisfy isOp
+  where
+    isOp (TOperator _) = True
+    isOp _ = False
 
--- parseCharLiteral = 
+parseToken f = satisfy (isJust . f) >>= \tok -> pure (fromJust (f tok))
+  where
+    isJust (Just _) = True
+    isJust Nothing = False
+    fromJust (Just x) = x
+    fromJust Nothing = error "fromJust: Nothing - this should never happen"
 
--- parseFnDef = single (TString "def") *> blanks
+parseAssignment = do
+  TIdent ident <- satisfy isIdent <* single (TOperator '=')
+  Assignment ident <$> parseExpression
+
+parseLoop = do
+  ref <- L.indentLevel
+  cond <- single (TIdent "while") *> parseExpression
+  body <- pLexeme (single TTwoDots) *> parseIndentedBlock ref
+  return (Loop cond body)
+
+parseCondition = do
+  ref <- L.indentLevel
+  cond <- single (TIdent "if") *> parseExpression <* single TTwoDots
+  thenBlock <- parseIndentedBlock ref
+  elseBlock <-
+    optional $ do
+      L.indentGuard sc EQ ref
+      _ <- single (TIdent "else") *> single TTwoDots
+      parseIndentedBlock ref
+  return (Condition cond thenBlock elseBlock)
+
+parseTerm :: Parser Ast
+parseTerm =
+  pLexeme
+    $ choice
+        [ between
+            (pLexeme (single TLeftParenthesis))
+            (pLexeme (single TRightParenthesis))
+            parseExpression
+        , try parseFuncCall
+        , parseLiteral
+        ]
+
+parseExpression :: Parser Ast
+parseExpression = makeExprParser parseTerm opTable
+
+binary :: Char -> NOperator -> Operator Parser Ast
+binary opChar astConstructor =
+  InfixL (BinaryExpression astConstructor <$ pOperator opChar)
+  where
+    pOperator c =
+      pLexeme
+        $ parseToken $ \case
+        TOperator op
+          | op == c -> Just ()
+        _ -> Nothing
+
+opTable :: [[Operator Parser Ast]]
+opTable =
+  [ [binary '*' Multiply, binary '/' Divide, binary '%' Modulo]
+  , [binary '+' Add, binary '-' Subtract]
+  , [binary '>' GreaterThan, binary '<' LesserThan]
+  ]
+
+parseSingleLineStatement :: Parser Ast
+parseSingleLineStatement =
+  pLexeme (choice [try parseAssignment, parseExpression])
+    <* satisfy (== TNewLine)
+
+blindwormParser =
+  choice
+    [parseFuncDefinition, parseLoop, parseCondition, parseSingleLineStatement]
+
+parseCode ::
+     String -> TokStream -> Either (ParseErrorBundle TokStream Void) [Ast]
+parseCode = runParser (many blindwormParser <* eof)
+
 -- | a bit of demonstration
-main = do
+main2 = do
   let msg x = putStrLn $ "\n*** " ++ x ++ ": ***\n"
   msg "tokenizer output"
-  let Right tokens = tokenize "input.txt" " test(x)"
-  let Right a = parseS "index.p" tokens in
-    print a
+  let Right tokens = tokenize "input.txt" "if i<j:\n j=a+2\nelse:\n j=a+5\n" --"while i<j:\n test(i)\n i=i+1\n"
+  let Right a = parseCode "index.p" tokens
+   in print a
   let Right err = tokenize "input.txt" "0 1 \n   four 5\n"
   msg "parser output"
   print err
@@ -219,6 +346,18 @@ main = do
   let Left err = parsePairs "input.txt" tokens
   msg "error message that handles empty line"
   putStrLn $ errorBundlePretty err
+
+main = do
+  args <- getArgs
+  when (null args) $ die "no input file supplied"
+  let input = head args
+  contents <- readFile input
+  case tokenize input contents of
+    Right tokens ->
+      case parseCode input tokens of
+        Right res -> prettyPrintAst res
+        Left err -> putStrLn $ errorBundlePretty err
+    Left err -> print err
 
 -- | This is a megaparsec Stream instance for our `TokStream`, which works as
 -- an adapter between our lists of labeled tokens and megaparsec. Essentially,
@@ -264,7 +403,7 @@ instance TraversableStream TokStream where
         linesFinished = length . filter isNewLine $ rst
         sameLine = linesFinished == 0
         line = unLine (reverse rln)
-        rest = unLine (fst $ break isNewLine resttoks)
+        rest = unLine (takeWhile (not . isNewLine) resttoks)
         unLine = unTab . concatMap strT
         unTab "" = ""
         unTab ('\t':cs) = replicate (unPos $ pstateTabWidth pst) ' ' ++ unTab cs
@@ -283,3 +422,62 @@ instance TraversableStream TokStream where
                 sp {sourceLine = mkPos row, sourceColumn = mkPos col}
             , pstateLinePrefix = pfx line
             })
+
+printAst :: Ast -> P.Doc
+printAst (CharLiteral c) = quotes (P.char (chr c))
+printAst (IntLiteral i) = P.int i
+printAst (Variable s) = P.text s
+printAst Pass = P.text "pass"
+printAst (BinaryExpression op l r) =
+  printAst l <> printOperator op <> printAst r
+printAst (Assignment name value) = P.text name <> P.equals <> printAst value
+printAst (FunctionDefinition name args body) =
+  P.vcat
+    [ P.text "def"
+        P.<+> P.text name
+                P.<> P.parens (P.hsep (P.punctuate P.comma (map P.text args)))
+        P.<+> P.lbrace
+    , P.nest 4 (P.vcat (map printAstStatement body))
+    , P.rbrace <> P.text "\n"
+    ]
+printAst (FunctionCall name args) =
+  P.text name <> P.parens (P.hsep (P.punctuate P.comma (map printAst args)))
+printAst (Loop cond body) =
+  P.vcat
+    [ P.text "while" P.<+> P.parens (printAst cond) P.<+> P.lbrace
+    , P.nest 4 (printBlock body)
+    , P.rbrace <> P.text "\n"
+    ]
+printAst (Condition cond thenBlock elseBlock) =
+  let ifBlock =
+        P.vcat
+          [ P.text "if" <> printAst cond <> P.colon
+          , P.nest 4 (printBlock thenBlock)
+          ]
+   in case elseBlock of
+        Nothing -> ifBlock
+        Just elseBody ->
+          P.vcat
+            [ifBlock, P.text "else" <> P.colon, P.nest 4 (printBlock elseBody)]
+
+printOperator :: NOperator -> P.Doc
+printOperator Add = P.char '+'
+printOperator Subtract = P.char '-'
+printOperator Multiply = P.char '*'
+printOperator Divide = P.char '/'
+printOperator Modulo = P.char '%'
+printOperator GreaterThan = P.char '>'
+printOperator LesserThan = P.char '<'
+
+printBlock :: [Ast] -> P.Doc
+printBlock statements = P.vcat (map printAstStatement statements)
+
+printAstStatement :: Ast -> P.Doc
+printAstStatement ast =
+  case ast of
+    FunctionDefinition {} -> printAst ast
+    Loop {} -> printAst ast
+    Condition {} -> printAst ast
+    _ -> printAst ast <> P.semi
+
+prettyPrintAst ast = putStrLn (P.render (P.vcat (map printAstStatement ast)))
