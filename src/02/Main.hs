@@ -1,17 +1,17 @@
 #!/usr/bin/env cabal
 {- cabal:
-build-depends: base, parser-combinators, megaparsec, pretty
+build-depends: base, parser-combinators,containers, megaparsec, pretty, mtl
 -}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE LambdaCase #-}
 
-import Control.Monad (guard, void, when)
+import Control.Monad (guard, void, when, replicateM_)
 import Control.Monad.Combinators.Expr
 import Data.Bool (bool)
 import Data.Char (chr)
 import Data.Fixed (div')
 import Data.List (intercalate)
-import Data.List.NonEmpty (NonEmpty(..))
+import Data.List.NonEmpty (NonEmpty(..), nub)
 import Data.Void (Void)
 import System.Console.GetOpt (ArgDescr(NoArg))
 import System.Environment (getArgs)
@@ -23,6 +23,14 @@ import qualified Text.Megaparsec.Internal as LL
 import qualified Text.PrettyPrint as P
 import Text.PrettyPrint (quotes)
 import Text.Read (Lexeme(Char))
+import Data.Map (Map)
+import Control.Monad.Writer
+import Control.Monad.Reader
+import qualified Data.Map as Map
+import Data.Maybe (fromMaybe)
+import Control.Monad.State (StateT, modify, evalStateT, MonadState (get, put))
+import Data.Containers.ListUtils (nubOrd)
+import Debug.Trace (traceShow, trace)
 
 {- | A data type for tokens. `TBlanks` stores the size of the blank space,
  - because we need it to measure the indentation width. -}
@@ -347,6 +355,139 @@ main2 = do
   msg "error message that handles empty line"
   putStrLn $ errorBundlePretty err
 
+opStr Add         = "+"
+opStr Subtract    = "-"
+opStr Multiply    = "*"
+opStr Divide      = "/"
+opStr Modulo      = "%"
+opStr GreaterThan = ">"
+opStr LesserThan  = "<"
+
+type StackOffset = Int
+data Env = Env {globals :: Map String StackOffset, locals :: Map String StackOffset}
+type CodeGen = ReaderT Env (StateT StackOffset (Writer [String])) ()
+
+emit :: Ast -> CodeGen
+
+emit (IntLiteral n) = do
+    modify (+1)
+    tell [show n]
+
+emit (Variable name) = do
+    Env gbls lcls <- ask
+    depth <- get
+    let lookupLocal =
+          fmap (\slot -> depth - 1 - slot) (Map.lookup name  lcls)
+        lookupGlobal =
+          fmap (\slot -> depth - 1 - slot) (Map.lookup name  gbls)
+    let offset = case lookupLocal <|> lookupGlobal of
+                  Just ofs -> ofs
+                  Nothing -> error $ "Unbound variable: " ++ name
+    modify (+1)
+    tell [show offset, "peek"]
+
+
+emit (Assignment name rhs) = do                  
+    Env gbls lcls <- ask
+    depth <- get
+    emit rhs 
+    let a = trace (show depth) depth
+    let lookupLocal =
+          fmap (\slot ->  trace ("") depth - 1 - slot) (Map.lookup name lcls)
+        lookupGlobal =
+          fmap (\slot ->  trace ("") depth - 1 - slot) (Map.lookup name gbls)
+    let offset = case lookupLocal <|> lookupGlobal of
+                  Just ofs -> ofs
+                  Nothing -> error $ "Unknown variable: " ++ name
+    modify(\n -> n -1)
+    tell [show offset]
+    tell ["poke", "0"]
+
+emit (BinaryExpression op a b) = do
+    emit a
+    emit b
+    modify (\n -> n - 1)
+    tell [opStr op]
+
+emit (FunctionCall fn args) = do
+    mapM_ emit args
+    st <- get
+    modify (\n -> n - length args + 1)
+    tell [fn]
+
+emit Pass = do
+    modify (+1)
+    tell ["0"]
+
+emit (FunctionDefinition fname args body) = do
+    tell [":", fname]
+    Env gbls _ <- ask
+    oldDepth <- get
+    let localVar = collectGlobals body
+    let lcls = Map.fromList $ zip (args++localVar) [oldDepth..]
+    let funEnv = Env {globals = gbls, locals = lcls}
+    modify (+ length args)
+    replicateM_  (length  localVar) $ emit  $ IntLiteral 0 
+    local (const funEnv) $ mapM_ emit body
+    put (oldDepth)
+    tell [";"]
+
+emit (Condition cond thenB elseB) = do
+    env <- ask
+    depth <- get
+    let estimate code =
+          execWriter $ evalStateT (runReaderT (mapM_ emit code) env) depth
+    let thenLength = length (estimate thenB)
+    let elseLength = maybe 0 (length . estimate) elseB
+    let elseJump = show (thenLength + 2)
+    let endJump  = show (elseLength + 1)
+    emit cond
+    tell ["?branch", elseJump]
+    mapM_ emit thenB
+    case elseB of
+      Nothing   -> do
+        modify (+1)
+        tell ["0"]
+      Just eb -> do
+        tell ["branch", endJump]
+        mapM_ emit eb
+
+emit (Loop cond body) = do
+    env <- ask
+    depth <- get
+    let estimate code =
+            execWriter $ evalStateT (runReaderT (mapM_ emit code) env) depth
+    let bodyLen = length (estimate body)
+    let condLen = length (estimate [cond])
+    let jumpOut = show (bodyLen + 4)
+    let jumpBack = show (-(bodyLen + condLen + 2))
+    emit cond
+    tell ["?branch", jumpOut]
+    mapM_ emit body
+    tell ["branch", jumpBack]
+    modify (+1) -- dummy value
+    tell ["0"]
+
+collectGlobals :: [Ast] -> [String]
+collectGlobals = go []
+  where
+    go acc [] = acc
+    go acc (Assignment name _:rest) = go (name:acc) rest
+    go acc (FunctionDefinition _ _ _ :rest) = go acc rest
+    go acc (Loop _ body :rest) = go (go acc body) rest
+    go acc (Condition _ tb (Just eb) :rest) = go (go (go acc tb) eb) rest
+    go acc (Condition _ tb Nothing :rest) = go (go acc tb) rest
+    go acc (_:rest) = go acc rest
+
+emitProgram :: [Ast] -> [String]
+emitProgram asts =
+  let globalsList = nubOrd $ collectGlobals asts     
+      gblMap = Map.fromList $ zip globalsList [0..]
+      allocations = replicate (Map.size gblMap) "0"
+      env = Env gblMap Map.empty
+      code = execWriter $ evalStateT (runReaderT (mapM_ emit asts) env) (Map.size gblMap)
+  in allocations ++ code
+
 main = do
   args <- getArgs
   when (null args) $ die "no input file supplied"
@@ -355,7 +496,8 @@ main = do
   case tokenize input contents of
     Right tokens ->
       case parseCode input tokens of
-        Right res -> prettyPrintAst res
+        Right res ->  let hrotfCode = emitProgram res in
+                      mapM_ putStrLn hrotfCode
         Left err -> putStrLn $ errorBundlePretty err
     Left err -> print err
 
