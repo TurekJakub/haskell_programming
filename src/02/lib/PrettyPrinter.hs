@@ -1,45 +1,35 @@
 module PrettyPrinter where
 
+import BlindwormParser
 import Data.Char (chr)
 import Text.PrettyPrint
-import qualified Text.PrettyPrint as P ((<>)) 
-import BlindwormParser
-
+import qualified Text.PrettyPrint as P ((<>))
 
 printAst :: Ast -> Doc
 printAst (CharLiteral c) = quotes (char (chr c))
-
 printAst (IntLiteral i) = int i
-
 printAst (Variable s) = text s
-
 printAst Pass = text "pass"
-
 printAst (BinaryExpression op l r) =
   printAst l <+> printOperator op <+> printAst r
-
 printAst (Assignment name value) = text name <+> equals <+> printAst value
-
 printAst (FunctionDefinition name args body) =
   vcat
     [ text "def"
         <+> text name
-                <+> parens (hsep (punctuate comma (map text args)))
+        <+> parens (hsep (punctuate comma (map text args)))
         <+> lbrace
     , nest 4 (vcat (map printAstStatement body))
     , rbrace <+> text "\n"
     ]
-
 printAst (FunctionCall name args) =
   text name P.<> parens (hsep (punctuate comma (map printAst args)))
-
 printAst (Loop cond body) =
   vcat
     [ text "while" <+> parens (printAst cond) <+> lbrace
     , nest 4 (printBlock body)
     , rbrace <+> text "\n"
     ]
-
 printAst (Condition cond thenBlock elseBlock) =
   let ifBlock =
         vcat
@@ -51,24 +41,19 @@ printAst (Condition cond thenBlock elseBlock) =
         Nothing -> ifBlock
         Just elseBody ->
           vcat
-            [ifBlock, text "else" <+> lbrace
+            [ ifBlock
+            , text "else" <+> lbrace
             , nest 4 (printBlock elseBody)
-            ,rbrace <+> text "\n"
+            , rbrace <+> text "\n"
             ]
 
 printOperator :: AstOperator -> Doc
 printOperator Add = char '+'
-
 printOperator Subtract = char '-'
-
 printOperator Multiply = char '*'
-
 printOperator Divide = char '/'
-
 printOperator Modulo = char '%'
-
 printOperator GreaterThan = char '>'
-
 printOperator LesserThan = char '<'
 
 printBlock :: [Ast] -> Doc

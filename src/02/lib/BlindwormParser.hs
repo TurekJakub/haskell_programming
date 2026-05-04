@@ -10,11 +10,11 @@ import Data.List (intercalate)
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Void (Void)
 
+import qualified Control.Monad.Identity as Data.Functor.Identity
+import Data.Char (ord)
 import Text.Megaparsec
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
-import qualified Control.Monad.Identity as Data.Functor.Identity
-import Data.Char (ord)
 
 {- | A data type for tokens. `TBlanks` stores the size of the blank space,
  - because we need it to measure the indentation width. -}
@@ -139,7 +139,8 @@ blanks = void $ many (satisfy isBlank)
     isBlank _ = False
 
 skipNewlines :: Parser ()
-skipNewlines = void $ many $ satisfy (==TNewLine)
+skipNewlines = void $ many $ satisfy (== TNewLine)
+
 -- | eat blanks after a given parse
 pLexeme :: Parser a -> Parser a
 pLexeme = (<* blanks)
@@ -161,7 +162,7 @@ parseIntLiteral = do
     isInt _ = False
 
 parsePass :: ParsecT Void TokStream Data.Functor.Identity.Identity Ast
-parsePass = do 
+parsePass = do
   TIdent _ <- blanks *> satisfy (== TIdent "pass")
   return Pass
 
@@ -189,7 +190,8 @@ parseFuncArgs =
 parseIndentedBlock :: Pos -> Parser [Ast]
 parseIndentedBlock ref = do
   _ <- satisfy (== TNewLine)
-  some (parseBlockLine ref) <?> "code block cannot be empty - hint: use pass keyword"
+  some (parseBlockLine ref)
+    <?> "code block cannot be empty - hint: use pass keyword"
 
 sc :: Parser ()
 sc = L.space (void $ satisfy isSpaceToken) empty empty
@@ -227,9 +229,9 @@ parseFuncCall = do
       <* single TRightParenthesis
   return (FunctionCall name args)
 
-
 parseToken :: MonadParsec e s m => (Token s -> Maybe b) -> m b
-parseToken f = satisfy (isJust . f) >>= \parsed_token -> pure (fromJust (f parsed_token))
+parseToken f =
+  satisfy (isJust . f) >>= \parsed_token -> pure (fromJust (f parsed_token))
   where
     isJust (Just _) = True
     isJust Nothing = False
