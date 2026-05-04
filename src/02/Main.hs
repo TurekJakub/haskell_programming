@@ -22,7 +22,7 @@ import qualified Text.Megaparsec.Char.Lexer as L
 import qualified Text.Megaparsec.Internal as LL
 import qualified Text.PrettyPrint as P
 import Text.PrettyPrint (quotes)
-import Text.Read (Lexeme(Char))
+import Text.Read (Lexeme(Char, String))
 import Data.Map (Map)
 import Control.Monad.Writer
 import Control.Monad.Reader
@@ -35,6 +35,7 @@ import qualified Data.Set as Set
 import Data.Foldable (foldrM)
 import Data.Functor.Classes (Show1(liftShowList))
 import Text.Megaparsec.Char.Lexer (charLiteral)
+import qualified Data.Foldable as F
 
 {- | A data type for tokens. `TBlanks` stores the size of the blank space,
  - because we need it to measure the indentation width. -}
@@ -126,7 +127,7 @@ tokenize = runParser (TokStream <$> toks <* eof)
 -- | The parser takes the tagged stream of tokens as an input
 type Parser = Parsec Void TokStream
 
-data NOperator
+data AstOperator
   = Add
   | Subtract
   | Multiply
@@ -143,7 +144,7 @@ data Ast
   | FunctionDefinition String [String] [Ast]
   | FunctionCall String [Ast]
   | Assignment String Ast
-  | BinaryExpression NOperator Ast Ast
+  | BinaryExpression AstOperator Ast Ast
   | Condition Ast [Ast] (Maybe [Ast])
   | Loop Ast [Ast]
   | Pass
@@ -294,7 +295,7 @@ parseTerm =
 parseExpression :: Parser Ast
 parseExpression = makeExprParser parseTerm opTable
 
-binary :: Char -> NOperator -> Operator Parser Ast
+binary :: Char -> AstOperator -> Operator Parser Ast
 binary opChar astConstructor =
   InfixL (BinaryExpression astConstructor <$ pOperator opChar)
   where
@@ -359,6 +360,7 @@ main2 = do
   msg "error message that handles empty line"
   putStrLn $ errorBundlePretty err
 
+opStr :: AstOperator -> String
 opStr Add         = "+"
 opStr Subtract    = "-"
 opStr Multiply    = "*"
@@ -368,129 +370,154 @@ opStr GreaterThan = ">"
 opStr LesserThan  = "<"
 
 type StackOffset = Int
-data Env = Env {globals :: Map String StackOffset, locals :: Map String StackOffset}
+type VariableScope = Map String StackOffset
+data Env = Env {globals :: VariableScope , locals :: VariableScope}
 type CodeGen = ReaderT Env (StateT StackOffset (Writer [String])) ()
 
-emit :: Ast -> CodeGen
+lookupVarDepth :: String -> Env -> Int -> Int
+lookupVarDepth name env depth = do
+  let Env { globals = globals , locals = locals } = env
+  let lookupVar scope = fmap ( \slot -> depth - 1 - slot) (Map.lookup name scope)
+  case lookupVar locals <|> lookupVar globals of
+                Just ofs -> ofs
+                Nothing -> error $ "Unbound variable: " ++ name
 
-emit (IntLiteral n) = do
+codeGenBlock :: [Ast] -> CodeGen
+codeGenBlock []     = return ()
+codeGenBlock [last] = codeGen last
+codeGenBlock (stmt:rest) = do
+  codeGen stmt     
+  tell ["drop"] 
+  codeGenBlock rest 
+
+codeGenStatement :: Ast -> CodeGen
+codeGenStatement statement = do
+  codeGen statement
+  tell ["0", "drop"]
+  modify(\d -> d -1)
+
+codeGen :: Ast -> CodeGen
+
+codeGen (IntLiteral n) = do
     modify (+1)
     tell [show n]
 
-emit (Variable name) = do
-    Env gbls lcls <- ask
+codeGen (Variable name) = do
+    env  <- ask
     depth <- get
-    let lookupLocal =
-          fmap (\slot -> depth - 1 - slot) (Map.lookup name  lcls)
-        lookupGlobal =
-          fmap (\slot -> depth - 1 - slot) (Map.lookup name  gbls)
-    let offset = case lookupLocal <|> lookupGlobal of
-                  Just ofs -> ofs
-                  Nothing -> error $ "Unbound variable: " ++ name
+  
+    let offset = lookupVarDepth name env depth
+
     modify (+1)
     tell [show offset, "peek"]
 
 
-emit (Assignment name rhs) = do                  
-    Env gbls lcls <- ask
+codeGen (Assignment name rhs) = do                  
+    env <- ask
     depth <- get
-    emit rhs 
-    let a = trace (show depth) depth
-    let lookupLocal =
-          fmap (\slot ->  trace ("") depth - 1 - slot) (Map.lookup name lcls)
-        lookupGlobal =
-          fmap (\slot ->  trace ("") depth - 1 - slot) (Map.lookup name gbls)
-    let offset = case lookupLocal <|> lookupGlobal of
-                  Just ofs -> ofs
-                  Nothing -> error $ "Unknown variable: " ++ name
-    modify(\n -> n -1)
-    tell [show offset]
-    tell ["poke", "0"]
 
-emit (BinaryExpression op a b) = do
-    emit a
-    emit b
+    codeGen rhs 
+    let offset = lookupVarDepth name env depth
+
+    modify(\n -> n -1)
+    tell [show offset, "poke", "0"]
+    modify(+1)
+
+codeGen (BinaryExpression op a b) = do
+    codeGen a
+    codeGen b
     modify (\n -> n - 1)
     tell [opStr op]
 
-emit (FunctionCall fn args) = do
-    mapM_ emit args
-    st <- get
-    modify (\n -> n - length args + 1)
-    tell [fn]
+codeGen (FunctionCall fn args) = do
+    mapM_ codeGen args
 
-emit Pass = do
+    case fn of 
+      "write" -> do
+        tell ["int_out", "10", "char_out"]
+        modify (+1)
+        tell["0"]
+      "print" -> do
+        tell ["int_in"]
+        modify (+1)
+      _ -> do
+        st <- get
+        modify (\n -> n - length args + 1)
+        tell [fn]
+
+codeGen Pass = do
     modify (+1)
     tell ["0"]
 
-emit (FunctionDefinition fname args body) = do
-    tell [":", fname]
-    Env gbls _ <- ask
+codeGen (FunctionDefinition name args body) = do
+    tell [":", name]
+    Env globals _ <- ask
     oldDepth <- get
-    let localVar = collectGlobals body
-    let lcls = Map.fromList $ zip (args++localVar) [oldDepth..]
-    let funEnv = Env {globals = gbls, locals = lcls}
+    let localVar = collectVariables body
+    let locals = Map.fromList $ zip (args++localVar) [oldDepth..]
+    let funEnv = Env {globals = globals, locals = locals}
     modify (+ length args)
-    replicateM_  (length  localVar) $ emit  $ IntLiteral 0 
-    local (const funEnv) $ mapM_ emit body
-    put (oldDepth)
-    tell [";"]
+    replicateM_  (length  localVar) $ codeGen  $ IntLiteral 0
+    local (const funEnv) $ codeGenBlock body
+    put oldDepth
+    tell [";", "0"]
+    modify (+1)
 
-emit (Condition cond thenB elseB) = do
+codeGen (Condition cond thenB elseB) = do
     env <- ask
     depth <- get
-    let estimate code =
-          execWriter $ evalStateT (runReaderT (mapM_ emit code) env) depth
-    let thenLength = length (estimate thenB)
-    let elseLength = maybe 0 (length . estimate) elseB
+    let getBlockLen code =
+          execWriter $ evalStateT (runReaderT (mapM_ codeGenStatement code) env) depth
+    let thenLength = length (getBlockLen thenB)
+    let elseLength = maybe 0 (length . getBlockLen) elseB
     let elseJump = show (thenLength + 2)
     let endJump  = show (elseLength + 1)
-    emit cond
+    codeGen cond
     tell ["?branch", elseJump]
-    mapM_ emit thenB
+    mapM_ codeGenStatement thenB
     case elseB of
-      Nothing   -> do
-        modify (+1)
-        tell ["0"]
       Just eb -> do
         tell ["branch", endJump]
-        mapM_ emit eb
+        mapM_ codeGenStatement eb
+    modify(+1)
+    tell ["0"]
 
-emit (Loop cond body) = do
+codeGen (Loop cond body) = do
     env <- ask
     depth <- get
     let estimate code =
-            execWriter $ evalStateT (runReaderT (mapM_ emit code) env) depth
+            execWriter $ evalStateT (runReaderT (mapM_ codeGenStatement code) env) depth
     let bodyLen = length (estimate body)
     let condLen = length (estimate [cond])
     let jumpOut = show (bodyLen + 4)
     let jumpBack = show (-(bodyLen + condLen + 2))
-    emit cond
+    codeGen cond
     tell ["?branch", jumpOut]
-    mapM_ emit body
+    mapM_ codeGenStatement body
     tell ["branch", jumpBack]
-    modify (+1) -- dummy value
+    modify (+1)
     tell ["0"]
 
-collectGlobals :: [Ast] -> [String]
-collectGlobals = go []
+collectVariables :: [Ast] -> [String]
+collectVariables = collect []
   where
-    go acc [] = acc
-    go acc (Assignment name _:rest) = go (name:acc) rest
-    go acc (FunctionDefinition _ _ _ :rest) = go acc rest
-    go acc (Loop _ body :rest) = go (go acc body) rest
-    go acc (Condition _ tb (Just eb) :rest) = go (go (go acc tb) eb) rest
-    go acc (Condition _ tb Nothing :rest) = go (go acc tb) rest
-    go acc (_:rest) = go acc rest
+    collect :: [String] -> [Ast] -> [String]
+    collect acc [] = acc
+    collect acc (Assignment name _:rest) = collect (name:acc) rest
+    collect acc (FunctionDefinition {} :rest) = collect acc rest
+    collect acc (Loop _ body :rest) = collect (collect acc body) rest
+    collect acc (Condition _ tb (Just eb) :rest) = collect (collect (collect acc tb) eb) rest
+    collect acc (Condition _ tb Nothing :rest) = collect (collect acc tb) rest
+    collect acc (_:rest) = collect acc rest
 
-emitProgram :: [Ast] -> [String]
-emitProgram asts =
-  let globalsList = nubOrd $ collectGlobals asts     
-      gblMap = Map.fromList $ zip globalsList [0..]
-      allocations = replicate (Map.size gblMap) "0"
-      env = Env gblMap Map.empty
-      code = execWriter $ evalStateT (runReaderT (mapM_ emit asts) env) (Map.size gblMap)
-  in allocations ++ code
+codeGenAst :: [Ast] -> [String]
+codeGenAst ast =
+  let globals = nubOrd $ collectVariables ast
+      globalsScope = Map.fromList $ zip globals [0..]
+      globalsDefaults = replicate (Map.size globalsScope) "0"
+      env = Env globalsScope Map.empty
+      code = execWriter $ evalStateT (runReaderT (mapM_ codeGenStatement ast) env) (Map.size globalsScope)
+  in globalsDefaults ++ code
 
 data ValidationError
   = UndefinedVariable String
@@ -515,10 +542,10 @@ data CheckError = AnalysisError
 type CorrectnessCheck a = ReaderT CheckEnv (ReaderT ErrorContext (StateT CheckState (Writer [CheckError]))) a
 
 checkFuncExists :: String -> CheckEnv -> Bool
-checkFuncExists name env = Map.member name env
+checkFuncExists = Map.member
 
 addFunc :: String -> Int -> CheckEnv -> CheckEnv
-addFunc name arity env = Map.insert name arity env
+addFunc  = Map.insert
 
 lookupFuncArity :: String -> CorrectnessCheck (Maybe Int)
 lookupFuncArity name = do asks (Map.lookup name)
@@ -595,9 +622,7 @@ check (Condition cond thenBlock elseBlock) =
   withContext ("in condition") $ do 
       check cond
       checkCodeBlock thenBlock
-      case elseBlock of
-        Just block -> checkCodeBlock block
-        Nothing -> return ()
+      F.forM_ elseBlock checkCodeBlock
 
 check (BinaryExpression op lhs rhs) = 
   withContext "in expression "$ do
@@ -633,8 +658,8 @@ main = do
   case tokenize input contents of
     Right tokens ->
       case parseCode input tokens of
-        Right res ->  let errs = doCorrectnessCheck res in
-                      prettyPrintErrors errs
+        Right res ->  let errs = codeGenAst res in
+                      mapM_ putStrLn  errs
         Left err -> putStrLn $ errorBundlePretty err
     Left err -> print err
 
@@ -739,7 +764,7 @@ printAst (Condition cond thenBlock elseBlock) =
           P.vcat
             [ifBlock, P.text "else" <> P.colon, P.nest 4 (printBlock elseBody)]
 
-printOperator :: NOperator -> P.Doc
+printOperator :: AstOperator -> P.Doc
 printOperator Add = P.char '+'
 printOperator Subtract = P.char '-'
 printOperator Multiply = P.char '*'
