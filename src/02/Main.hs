@@ -591,11 +591,11 @@ check (Variable name)  = do
   exists <- checkVarExists name 
   unless exists  (logError $ UndefinedVariable name)
 
-check (Assignment name rhs) = withContext ("in assignment to '" ++ name ++ "'") $ do
+check (Assignment name rhs) = withContext ("in assignment " ++ P.render (printAst (Assignment name rhs))) $ do
   check rhs
   addVar name
 
-check (FunctionCall name args) = withContext ("in call to '" ++ name ++ "'") $ do
+check (FunctionCall name args) = withContext ("in function call " ++ name ++ "()") $ do
   expectedArityMaybe <- lookupFuncArity name
   varExists <- checkVarExists name
   case expectedArityMaybe of
@@ -614,18 +614,17 @@ check (FunctionDefinition name args body) =
     put originalScope
 
 check (Loop cond body) = 
-  withContext ("in loop") $ do
+  withContext ("in loop while " ++ P.render(printAst cond) ++ ":") $ do
       check cond
       checkCodeBlock body
 
 check (Condition cond thenBlock elseBlock) = 
-  withContext ("in condition") $ do 
+  withContext ("in condition if " ++ P.render (printAst cond) ++ ":") $ do 
       check cond
       checkCodeBlock thenBlock
       F.forM_ elseBlock checkCodeBlock
 
-check (BinaryExpression op lhs rhs) = 
-  withContext "in expression "$ do
+check (BinaryExpression op lhs rhs) =  do
   check lhs
   check rhs
 
@@ -658,8 +657,8 @@ main = do
   case tokenize input contents of
     Right tokens ->
       case parseCode input tokens of
-        Right res ->  let errs = codeGenAst res in
-                      mapM_ putStrLn  errs
+        Right res ->  let errs = doCorrectnessCheck res in
+                      prettyPrintErrors errs
         Left err -> putStrLn $ errorBundlePretty err
     Left err -> print err
 
