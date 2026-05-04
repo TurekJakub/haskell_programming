@@ -1,0 +1,28 @@
+cabal-version:      3.8
+
+name:               turek0
+
+version:            0.1.0.0
+
+license:            BSD-3-Clause
+
+author:             TurekJakub
+
+maintainer:         jakubturek32@gmail.com
+
+category:           Development
+build-type:         Simple
+
+common warnings
+    ghc-options: -Wall
+
+executable turek0
+    import:           warnings
+
+    main-is:          Main.hs
+
+    build-depends:    base 
+
+    hs-source-dirs:   ./
+
+    default-language: GHC2021
