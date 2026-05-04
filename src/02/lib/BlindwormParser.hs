@@ -3,14 +3,13 @@
 
 module BlindwormParser where
 
-import Control.Monad (void, when)
+import Control.Monad (void)
 import Control.Monad.Combinators.Expr
 import Data.Bool (bool)
 import Data.List (intercalate)
 import Data.List.NonEmpty (NonEmpty(..))
 import Data.Void (Void)
-import System.Environment (getArgs)
-import System.Exit (die)
+
 import Text.Megaparsec
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
@@ -139,6 +138,8 @@ blanks = void $ many (satisfy isBlank)
     isBlank (TBlanks _) = True
     isBlank _ = False
 
+skipNewlines :: Parser ()
+skipNewlines = void $ many $ satisfy (==TNewLine)
 -- | eat blanks after a given parse
 pLexeme :: Parser a -> Parser a
 pLexeme = (<* blanks)
@@ -304,7 +305,7 @@ blindwormParser =
 
 parseCode ::
      String -> TokStream -> Either (ParseErrorBundle TokStream Void) [Ast]
-parseCode = runParser (many blindwormParser <* eof)
+parseCode = runParser (many (skipNewlines *> blindwormParser) <* eof)
 
 -- | This is a megaparsec Stream instance for our `TokStream`, which works as
 -- an adapter between our lists of labeled tokens and megaparsec. Essentially,
