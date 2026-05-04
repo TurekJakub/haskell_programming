@@ -190,6 +190,10 @@ parseIntLiteral = do
     isInt (TInt _) = True
     isInt _ = False
 
+parsePass = do 
+  TIdent _ <- blanks *> satisfy (== TIdent "pass")
+  return Pass
+
 parseVariable = do
   TIdent name <- blanks *> satisfy isIdent
   return $ Variable name
@@ -210,7 +214,7 @@ parseFuncArgs =
 parseIndentedBlock :: Pos -> Parser [Ast]
 parseIndentedBlock ref = do
   _ <- satisfy (== TNewLine)
-  many (parseBlockLine ref)
+  some (parseBlockLine ref) <?> "code block cannot be empty - hint: use pass keyword"
 
 sc :: Parser ()
 sc = L.space (void $ satisfy isSpaceToken) empty empty
@@ -222,7 +226,7 @@ sc = L.space (void $ satisfy isSpaceToken) empty empty
 parseBlockLine :: Pos -> Parser Ast
 parseBlockLine ref = do
   L.indentGuard sc GT ref
-  pLexeme (choice [try parseAssignment, parseExpression])
+  pLexeme (choice [try parseAssignment, parsePass, parseExpression])
     <* satisfy (== TNewLine)
 
 parseOneLiner :: Parser [Ast]
@@ -315,7 +319,7 @@ opTable =
 
 parseSingleLineStatement :: Parser Ast
 parseSingleLineStatement =
-  pLexeme (choice [try parseAssignment, parseExpression])
+  pLexeme (choice [try parseAssignment, parsePass, parseExpression])
     <* satisfy (== TNewLine)
 
 blindwormParser =
