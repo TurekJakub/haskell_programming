@@ -11,7 +11,7 @@ cabal-version:      3.14
 --   http://haskell.org/cabal/users-guide/
 --
 -- The name of the package.
-name:               turek0
+name:               turek2
 
 -- The package version.
 -- See the Haskell package versioning policy (PVP) for standards
@@ -51,27 +51,47 @@ extra-doc-files:    CHANGELOG.md
 -- Extra source files to be distributed with the package, such as examples, or a tutorial module.
 -- extra-source-files:
 
+library
+    exposed-modules:  BlindwormParser, PrettyPrinter, Executor
+
+    build-depends:    base, parser-combinators, containers, megaparsec, pretty, mtl
+
+    ghc-options:      -Wall
+
+    hs-source-dirs:   src/02/lib
+
+    default-language: GHC2021
+
 common warnings
-    ghc-options: -Wall
+    ghc-options: -Wall 
 
-executable turek0
-    -- Import common warning flags.
-    import:           warnings
+common deps-turek2
+    build-depends: base, parser-combinators,containers, megaparsec, pretty, mtl, turek2
 
-    -- .hs or .lhs file containing the Main module.
-    main-is:          Main.hs
+executable turek2-bwcheck
+    import:           warnings, deps-turek2
 
-    -- Modules included in this executable, other than Main.
-    -- other-modules:
+    main-is:      BlindwormCorrectnessCheck.hs   
 
-    -- LANGUAGE extensions used by modules in this package.
-    -- other-extensions:
+    hs-source-dirs:   src/02/src
 
-    -- Other library packages from which modules are imported.
-    build-depends:    base 
+    default-language: GHC2021
 
-    -- Directories containing source files.
-    hs-source-dirs:   src/00
 
-    -- Base language which the package is written in.
-    -- default-language: GHC2024
+executable turek2-bw2hrotf
+    import:           warnings, deps-turek2
+
+    main-is:      HrotFTranspiler.hs   
+
+    hs-source-dirs:   src/02/src
+
+    default-language: GHC2021
+
+executable turek2-bw2braces
+    import:           warnings, deps-turek2
+
+    main-is:      BlindwormBraces.hs   
+
+    hs-source-dirs:   src/02/src
+
+    default-language: GHC2021
